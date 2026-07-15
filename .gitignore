@@ -39,12 +39,27 @@ build/
 web/node_modules/
 web/.next/
 web/out/
-web/.env
-web/.env.local
+web/.vercel/
+web/*.tsbuildinfo
+web/npm-debug.log*
 
 ### Python / FastAPI (api/) ###
 api/.venv/
+api/venv/
 api/__pycache__/
 api/**/__pycache__/
-api/.env
 *.pyc
+
+### Secrets & local env (never push) ###
+.env
+.env.*
+!.env.example
+!**/.env.example
+*.pem
+*.key
+secrets.json
+credentials.json
+
+### Logs / misc local artifacts ###
+*.log
+.cache/
