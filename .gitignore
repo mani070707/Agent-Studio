@@ -44,6 +44,7 @@ web/*.tsbuildinfo
 web/npm-debug.log*
 
 ### Python / FastAPI (api/) ###
+.venv/
 api/.venv/
 api/venv/
 api/__pycache__/
@@ -63,3 +64,5 @@ credentials.json
 ### Logs / misc local artifacts ###
 *.log
 .cache/
+api/*.db
+api/*.db-journal
