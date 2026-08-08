@@ -56,7 +56,9 @@ Backend/.model-cache/
 *.egg-info/
 
 ### Private local documentation ###
-/docs/
+/docs/**
+!/docs/screenshots/
+!/docs/screenshots/**
 /LEARNING-ROADMAP.md
 
 ### Secrets & local env (never push) ###
