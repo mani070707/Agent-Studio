@@ -58,6 +58,8 @@ def verify_jwt(token: str) -> str:
         raise HTTPException(status_code=401, detail="Token expired")
     if settings.jwt_audience and claims.get("aud") != settings.jwt_audience:
         raise HTTPException(status_code=401, detail="Invalid token audience")
+    if settings.supabase_jwt_issuer and claims.get("iss") != settings.supabase_jwt_issuer:
+        raise HTTPException(status_code=401, detail="Invalid token issuer")
 
     sub = claims.get("sub")
     if not sub:

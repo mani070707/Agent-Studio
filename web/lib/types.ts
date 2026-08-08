@@ -66,9 +66,20 @@ export interface Connector {
 
 export interface ContentItem {
   id: string;
-  agent_id: string;
+  agent_id: string | null;
+  knowledge_base_id: string;
   filename: string;
   storage_path: string;
+}
+
+export interface KnowledgeBase {
+  id: string;
+  name: string;
+  description: string;
+  status: "active" | "archived";
+  document_count: number;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Agent {
@@ -84,12 +95,51 @@ export interface Agent {
 }
 
 export interface RuntimeModelConfig {
-  provider: "anthropic" | "openai";
+  provider: "gemini" | "groq" | "openrouter" | "openai" | "anthropic";
   model_id: string;
   temperature: number;
   max_tokens: number;
   timeout_ms: number;
-  api_key_secret_ref: string;
+  api_key_secret_ref?: string;
+  provider_connection_id?: string;
+  usage_tier?: "free" | "standard";
+}
+
+export interface ModelDefinition {
+  id: string;
+  name: string;
+  tool_calling: boolean;
+  structured_output: boolean;
+  context_window: number;
+  free_max_output_tokens: number;
+}
+
+export interface ModelProvider {
+  id: RuntimeModelConfig["provider"];
+  name: string;
+  free_tier_available: boolean;
+  notice: string;
+  models: ModelDefinition[];
+}
+
+export interface ProviderConnection {
+  id: string;
+  provider: RuntimeModelConfig["provider"];
+  display_name: string;
+  validation_status: "valid" | "invalid" | "unverified";
+  last_validated_at: string | null;
+  created_at: string;
+}
+
+export interface RunPreflight {
+  usage_tier: "free" | "standard";
+  estimated_input_tokens: number;
+  likely_subtasks: number;
+  selected_tools: number;
+  document_count: number;
+  limits: Record<string, number>;
+  warnings: string[];
+  high_complexity: boolean;
 }
 
 export interface PromptGuardrailsConfig {
@@ -142,9 +192,23 @@ export interface Run {
   agent_version_id: string;
   status: "pending" | "running" | "completed" | "failed";
   input: Record<string, unknown>;
-  output: Record<string, unknown> | null;
+  output: (Record<string, unknown> & {
+    error?: string;
+    failure?: RunFailure;
+    partial_output?: Record<string, unknown> | null;
+  }) | null;
   started_at: string | null;
   completed_at: string | null;
+}
+
+export interface RunFailure {
+  code: string;
+  reason: string;
+  retryable: boolean;
+  retry_after: string | null;
+  recommendations: string[];
+  consumed: Record<string, number>;
+  limits: Record<string, number>;
 }
 
 export interface RunStep {

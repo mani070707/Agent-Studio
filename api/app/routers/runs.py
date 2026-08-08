@@ -7,7 +7,7 @@ from app.core.auth import get_current_user_id
 from app.db.crud_helpers import get_owned_or_404
 from app.db.models import Agent, AgentVersion, Run, RunStep
 from app.db.session import get_db
-from app.runs.executor import execute_run
+from app.runs.executor import execute_run, preflight_for_run
 
 router = APIRouter(tags=["runs"])
 
@@ -30,6 +30,21 @@ class RunStepOut(BaseModel):
     step_num: int
     type: str
     detail: dict
+
+
+@router.post("/agents/{agent_id}/versions/{version_id}/run/preflight")
+def preflight_agent_version(
+    agent_id: str,
+    version_id: str,
+    body: RunIn,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    get_owned_or_404(db, Agent, agent_id, user_id)
+    version = db.query(AgentVersion).filter(AgentVersion.id == version_id, AgentVersion.agent_id == agent_id).first()
+    if not version:
+        raise HTTPException(status_code=404, detail="Agent version not found")
+    return preflight_for_run(db, version, agent_id, body.input)
 
 
 @router.post("/agents/{agent_id}/versions/{version_id}/run", response_model=RunOut)

@@ -38,6 +38,7 @@ build/
 ### Node / Next.js (web/) ###
 web/node_modules/
 web/.next/
+web/.next-dev/
 web/out/
 web/.vercel/
 web/*.tsbuildinfo
@@ -50,6 +51,7 @@ api/venv/
 api/__pycache__/
 api/**/__pycache__/
 *.pyc
+*.egg-info/
 
 ### Secrets & local env (never push) ###
 .env

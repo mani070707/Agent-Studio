@@ -1,7 +1,9 @@
 import uuid
 from typing import Optional
 
-from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
@@ -42,6 +44,19 @@ class UserSecret(Base):
     user_id: Mapped[str] = mapped_column(String, index=True)
     name: Mapped[str] = mapped_column(String)
     encrypted_value: Mapped[str] = mapped_column(Text)
+
+
+class ProviderConnection(Base):
+    __tablename__ = "provider_connection"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(String, index=True)
+    provider: Mapped[str] = mapped_column(String)
+    display_name: Mapped[str] = mapped_column(String)
+    secret_ref: Mapped[str] = mapped_column(String)
+    validation_status: Mapped[str] = mapped_column(String, default="unverified")
+    last_validated_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_at: Mapped[str] = mapped_column(String)
 
 
 class PlatformTool(Base):
@@ -91,10 +106,24 @@ class ContentItem(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(String, index=True)
-    agent_id: Mapped[str] = mapped_column(String, index=True)
+    agent_id: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True)
+    knowledge_base_id: Mapped[str] = mapped_column(String, index=True)
     filename: Mapped[str] = mapped_column(String)
     storage_path: Mapped[str] = mapped_column(String)
     extracted_text: Mapped[str] = mapped_column(Text, default="")
+
+
+class KnowledgeBase(Base):
+    __tablename__ = "knowledge_base"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(String, index=True)
+    name: Mapped[str] = mapped_column(String)
+    description: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String, default="active", index=True)
+    legacy_agent_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class Agent(Base):

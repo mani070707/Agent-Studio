@@ -1,7 +1,9 @@
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.db.models import Connector, McpTool, PlatformTool, SchemaEntry, Skill
+from app.db.models import Connector, McpTool, ProviderConnection, SchemaEntry, Skill
+from app.modules.providers.domain import ProviderCatalog
+from app.tools.registry import PLATFORM_TOOLS
 
 
 def validate_harness_selections(
@@ -15,6 +17,7 @@ def validate_harness_selections(
     mcp_tool_allowlist: list[str],
     connector_allowlist: list[str],
     skill_allowlist: list[str],
+    runtime_model: dict,
 ) -> None:
     """Reject a harness config referencing anything not in the registry or not owned by
     this user — enforced server-side, not just hidden in the UI."""
@@ -31,7 +34,7 @@ def validate_harness_selections(
     ).first():
         raise HTTPException(status_code=400, detail=f"input_schema_id '{input_schema_id}' not found")
 
-    known_platform_tools = {t.name for t in db.query(PlatformTool).all()}
+    known_platform_tools = set(PLATFORM_TOOLS)
     for name in tool_allowlist:
         if name not in known_platform_tools:
             raise HTTPException(status_code=400, detail=f"Unknown platform tool: '{name}'")
@@ -53,3 +56,21 @@ def validate_harness_selections(
     for allowed_skill_id in skill_allowlist:
         if not db.query(Skill).filter(Skill.id == allowed_skill_id, Skill.user_id == user_id).first():
             raise HTTPException(status_code=400, detail=f"Unknown skill_id in skill_allowlist: '{allowed_skill_id}'")
+
+    provider = runtime_model.get("provider")
+    try:
+        definition = ProviderCatalog().require(provider)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if runtime_model.get("model_id") not in {model.id for model in definition.models}:
+        raise HTTPException(status_code=400, detail="Selected model is not in the provider capability catalog")
+    connection_id = runtime_model.get("provider_connection_id")
+    legacy_ref = runtime_model.get("api_key_secret_ref")
+    if not connection_id and not legacy_ref:
+        raise HTTPException(status_code=400, detail="A provider connection or legacy secret reference is required")
+    if connection_id:
+        connection = db.query(ProviderConnection).filter(
+            ProviderConnection.id == connection_id, ProviderConnection.user_id == user_id
+        ).first()
+        if not connection or connection.provider != provider:
+            raise HTTPException(status_code=400, detail="Provider connection is unavailable or does not match")

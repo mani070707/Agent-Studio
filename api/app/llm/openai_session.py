@@ -13,8 +13,14 @@ class OpenAISession:
         system_prompt: str,
         tools: list[dict],
         timeout: float = 300.0,
+        base_url: str | None = None,
+        default_headers: dict | None = None,
+        provider: str = "openai",
     ):
-        self.client = openai.OpenAI(api_key=api_key, timeout=timeout)
+        self.client = openai.OpenAI(
+            api_key=api_key, timeout=timeout, base_url=base_url, default_headers=default_headers
+        )
+        self.provider = provider
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -30,6 +36,7 @@ class OpenAISession:
             for t in tools
         ]
         self.messages: list[dict] = [{"role": "system", "content": system_prompt}]
+        self.usage = {"model_calls": 0, "input_tokens": 0, "output_tokens": 0}
 
     def _call(self) -> dict:
         response = self.client.chat.completions.create(
@@ -39,6 +46,10 @@ class OpenAISession:
             temperature=self.temperature,
             max_tokens=self.max_tokens,
         )
+        self.usage["model_calls"] += 1
+        if response.usage:
+            self.usage["input_tokens"] += response.usage.prompt_tokens or 0
+            self.usage["output_tokens"] += response.usage.completion_tokens or 0
         choice = response.choices[0].message
         self.messages.append(choice.model_dump(exclude_none=True))
         tool_calls = [

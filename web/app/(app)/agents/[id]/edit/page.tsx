@@ -12,6 +12,10 @@ import type {
   McpServer,
   McpTool,
   PlatformTool,
+  ModelDefinition,
+  ModelProvider,
+  ProviderConnection,
+  RuntimeModelConfig,
   SchemaEntry,
   Skill,
 } from "@/lib/types";
@@ -38,9 +42,18 @@ export default function EditAgentPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
 
-  const [provider, setProvider] = useState<"anthropic" | "openai">("anthropic");
-  const [modelId, setModelId] = useState("claude-sonnet-5");
+  const [provider, setProvider] = useState<RuntimeModelConfig["provider"]>("gemini");
+  const [modelId, setModelId] = useState("gemini-2.5-flash");
   const [apiKeySecretRef, setApiKeySecretRef] = useState("");
+  const [providers, setProviders] = useState<ModelProvider[]>([]);
+  const [connections, setConnections] = useState<ProviderConnection[]>([]);
+  const [models, setModels] = useState<ModelDefinition[]>([]);
+  const [providerConnectionId, setProviderConnectionId] = useState("");
+  const [usageTier, setUsageTier] = useState<"free" | "standard">("standard");
+  const [connectionMode, setConnectionMode] = useState<"saved" | "new">("saved");
+  const [connectionName, setConnectionName] = useState("");
+  const [newApiKey, setNewApiKey] = useState("");
+  const [connecting, setConnecting] = useState(false);
   const [temperature, setTemperature] = useState(0);
   const [maxTokens, setMaxTokens] = useState(4096);
   const [role, setRole] = useState("");
@@ -63,7 +76,8 @@ export default function EditAgentPage() {
 
   useEffect(() => {
     async function load() {
-      const [agentData, versions, skillsData, schemasData, toolsData, mcpServers, connectorsData, triggersData] =
+      const [agentData, versions, skillsData, schemasData, toolsData, mcpServers, connectorsData, triggersData,
+        providersData, connectionsData] =
         await Promise.all([
           api.get<Agent>(`/agents/${agentId}`),
           api.get<AgentVersion[]>(`/agents/${agentId}/versions`),
@@ -73,6 +87,8 @@ export default function EditAgentPage() {
           api.get<McpServer[]>("/mcp-servers"),
           api.get<Connector[]>("/connectors"),
           api.get<AgentTrigger[]>(`/agents/${agentId}/triggers`),
+          api.get<ModelProvider[]>("/model-providers"),
+          api.get<ProviderConnection[]>("/provider-connections"),
         ]);
 
       setAgent(agentData);
@@ -81,6 +97,8 @@ export default function EditAgentPage() {
       setPlatformTools(toolsData);
       setConnectors(connectorsData);
       setTriggers(triggersData);
+      setProviders(providersData);
+      setConnections(connectionsData);
 
       const flatMcpTools: (McpTool & { serverName: string })[] = [];
       for (const server of mcpServers) {
@@ -94,7 +112,9 @@ export default function EditAgentPage() {
       if (existingDraft) {
         setProvider(existingDraft.harness_config.runtime_model.provider);
         setModelId(existingDraft.harness_config.runtime_model.model_id);
-        setApiKeySecretRef(existingDraft.harness_config.runtime_model.api_key_secret_ref);
+        setApiKeySecretRef(existingDraft.harness_config.runtime_model.api_key_secret_ref || "");
+        setProviderConnectionId(existingDraft.harness_config.runtime_model.provider_connection_id || "");
+        setUsageTier(existingDraft.harness_config.runtime_model.usage_tier || "standard");
         setTemperature(existingDraft.harness_config.runtime_model.temperature);
         setMaxTokens(existingDraft.harness_config.runtime_model.max_tokens);
         setRole(existingDraft.harness_config.prompt_guardrails.role);
@@ -114,14 +134,49 @@ export default function EditAgentPage() {
     load();
   }, [agentId]);
 
+  useEffect(() => {
+    if (!providerConnectionId) { setModels([]); return; }
+    api.get<ModelDefinition[]>(`/model-providers/${provider}/models?connection_id=${providerConnectionId}`)
+      .then((available) => {
+        setModels(available);
+        if (available.length && !available.some((model) => model.id === modelId)) setModelId(available[0].id);
+      })
+      .catch((err) => setError(err instanceof ApiError ? err.message : String(err)));
+  }, [provider, providerConnectionId]);
+
+  async function connectProvider(): Promise<string | null> {
+    if (connectionMode === "saved") return providerConnectionId || null;
+    if (!connectionName.trim() || !newApiKey.trim()) {
+      setError("Connection name and API key are required.");
+      return null;
+    }
+    setConnecting(true);
+    try {
+      const created = await api.post<ProviderConnection>("/provider-connections", {
+        provider, display_name: connectionName.trim(), api_key: newApiKey.trim(),
+      });
+      setConnections((current) => [...current, created]);
+      setProviderConnectionId(created.id);
+      setConnectionMode("saved");
+      setNewApiKey("");
+      return created.id;
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+      return null;
+    } finally { setConnecting(false); }
+  }
+
   async function handleSaveHarness() {
     setError("");
+    const connectionId = await connectProvider();
+    if (!connectionId && !apiKeySecretRef) return;
     const body = {
       harness_config: {
         runtime_model: {
           provider,
           model_id: modelId,
-          api_key_secret_ref: apiKeySecretRef,
+          ...(connectionId ? { provider_connection_id: connectionId } : { api_key_secret_ref: apiKeySecretRef }),
+          usage_tier: usageTier,
           temperature,
           max_tokens: maxTokens,
           timeout_ms: 300000,
@@ -200,24 +255,69 @@ export default function EditAgentPage() {
           <h3>Runtime Model</h3>
           <div className="field">
             <label>Provider</label>
-            <select value={provider} onChange={(e) => setProvider(e.target.value as "anthropic" | "openai")}>
-              <option value="anthropic">Anthropic</option>
-              <option value="openai">OpenAI</option>
+            <select value={provider} onChange={(e) => {
+              setProvider(e.target.value as RuntimeModelConfig["provider"]);
+              setProviderConnectionId("");
+              setModels([]);
+            }}>
+              {providers.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.name}{item.free_tier_available ? " · free tier available" : " · billing may be required"}
+                </option>
+              ))}
             </select>
+            <small className="field-help">{providers.find((item) => item.id === provider)?.notice}</small>
           </div>
           <div className="field">
             <label>Model ID</label>
-            <input value={modelId} onChange={(e) => setModelId(e.target.value)} placeholder="claude-sonnet-5" />
+            {models.length ? (
+              <select value={modelId} onChange={(e) => setModelId(e.target.value)}>
+                {models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
+              </select>
+            ) : (
+              <input value={modelId} onChange={(e) => setModelId(e.target.value)}
+                placeholder="Connect a provider to load compatible models" />
+            )}
           </div>
           <div className="field">
             <div className="field-label-row">
-              <label>Model API key reference</label>
+              <label>Provider connection</label>
               <a className="field-action-link" href="/secrets" target="_blank" rel="noreferrer">
                 Manage API keys ↗
               </a>
             </div>
-            <input value={apiKeySecretRef} onChange={(e) => setApiKeySecretRef(e.target.value)} placeholder="ANTHROPIC_API_KEY" />
-            <small className="field-help">Enter the saved credential name used for this model provider.</small>
+            <div className="ds-segmented">
+              <button type="button" className={connectionMode === "saved" ? "active" : ""}
+                onClick={() => setConnectionMode("saved")}>Saved connection</button>
+              <button type="button" className={connectionMode === "new" ? "active" : ""}
+                onClick={() => setConnectionMode("new")}>Paste new key</button>
+            </div>
+            {connectionMode === "saved" ? (
+              <select value={providerConnectionId} onChange={(e) => setProviderConnectionId(e.target.value)}>
+                <option value="">— select a connection —</option>
+                {connections.filter((item) => item.provider === provider).map((item) => (
+                  <option key={item.id} value={item.id}>{item.display_name} · {item.validation_status}</option>
+                ))}
+              </select>
+            ) : (
+              <div className="stack-sm">
+                <input value={connectionName} onChange={(e) => setConnectionName(e.target.value)}
+                  placeholder="My Gemini free key" />
+                <input type="password" autoComplete="new-password" value={newApiKey}
+                  onChange={(e) => setNewApiKey(e.target.value)} placeholder="Paste API key once" />
+                <small className="field-help">The backend validates and encrypts this key. It is never stored in the harness.</small>
+              </div>
+            )}
+            {!providerConnectionId && apiKeySecretRef && (
+              <small className="field-help">This draft currently uses legacy secret reference “{apiKeySecretRef}”.</small>
+            )}
+          </div>
+          <div className="field checkbox-field">
+            <label>
+              <input type="checkbox" checked={usageTier === "free"}
+                onChange={(e) => setUsageTier(e.target.checked ? "free" : "standard")} /> Free API key
+            </label>
+            <small className="field-help">Uses conservative call, tool, iteration, token and time budgets. Large tasks may return partial work.</small>
           </div>
           <div className="field">
             <label>Temperature</label>
@@ -341,8 +441,8 @@ export default function EditAgentPage() {
             ))}
           </div>
 
-          <button className="btn" onClick={handleSaveHarness} style={{ marginTop: "1rem" }}>
-            Save & Next →
+          <button className="btn" onClick={handleSaveHarness} disabled={connecting} style={{ marginTop: "1rem" }}>
+            {connecting ? "Validating key…" : "Save & Next →"}
           </button>
         </div>
       )}

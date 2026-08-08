@@ -5,11 +5,19 @@ import jsonschema
 from sqlalchemy.orm import Session
 
 from app.connectors.executor import execute_connector
-from app.core.secret_resolver import SecretResolutionError, resolve_secret
-from app.db.models import Connector, McpTool, Run, RunStep, Skill
+from app.core.secret_resolver import SecretResolutionError, resolve_provider_key, resolve_secret
+from app.db.models import Connector, ContentItem, McpTool, Run, RunStep, Skill
 from app.llm.factory import create_session
 from app.mcp_client.client import call_tool as call_mcp_tool
 from app.tools.registry import PLATFORM_TOOLS
+from app.runs.free_policy import (
+    FREE_LIMITS,
+    BudgetExceeded,
+    BudgetTracker,
+    build_preflight,
+    classify_provider_failure,
+    failure_output,
+)
 
 MAX_ITERATIONS = 15
 MAX_VALIDATION_RETRIES = 1
@@ -19,7 +27,11 @@ _VAR_PATTERN = re.compile(r"\{\{(\w+)\}\}")
 
 
 class RunFailedError(Exception):
-    pass
+    def __init__(self, code: str, reason: str, recommendations: list[str]):
+        super().__init__(reason)
+        self.code = code
+        self.reason = reason
+        self.recommendations = recommendations
 
 
 def _render_template(template: str, variables: dict) -> str:
@@ -126,26 +138,7 @@ def _log_step(db: Session, run_id: str, step_num: int, step_type: str, detail: d
     return step_num + 1
 
 
-async def execute_run(db: Session, run: Run, version, agent_id: str, user_id: str) -> None:
-    """Runs the full agent loop for one `run` row, mutating it in place (status/output/timestamps)
-    and appending `run_step` rows as it goes. Raises nothing — failures are recorded on the run."""
-    run.status = "running"
-    run.started_at = datetime.now(timezone.utc).isoformat()
-    db.commit()
-    step_num = 0
-
-    try:
-        runtime_model = version.harness_config["runtime_model"]
-        api_key = resolve_secret(db, user_id, runtime_model["api_key_secret_ref"])
-    except SecretResolutionError as exc:
-        run.status = "failed"
-        run.output = {"error": str(exc)}
-        run.completed_at = datetime.now(timezone.utc).isoformat()
-        db.commit()
-        return
-
-    tools, dispatch = _build_tools_and_dispatch(db, user_id, version, agent_id, version.output_schema.json_schema)
-
+def build_run_prompts(version, run_input: dict) -> tuple[str, str]:
     guardrails = version.harness_config.get("prompt_guardrails", {})
     system_prompt = version.skill.system_prompt
     if guardrails.get("role"):
@@ -156,31 +149,68 @@ async def execute_run(db: Session, run: Run, version, agent_id: str, user_id: st
         f"\n\nYou may only call the tools you have been given. When finished, call the "
         f"'{FINAL_ANSWER_TOOL}' tool exactly once with your final answer."
     )
-    user_message = _render_template(version.skill.user_prompt_template, run.input or {})
+    return system_prompt, _render_template(version.skill.user_prompt_template, run_input or {})
 
-    session = create_session(
-        provider=runtime_model["provider"],
-        api_key=api_key,
-        model=runtime_model["model_id"],
-        temperature=runtime_model.get("temperature", 0),
-        max_tokens=runtime_model.get("max_tokens", 4096),
-        system_prompt=system_prompt,
-        tools=tools,
-    )
 
+def preflight_for_run(db: Session, version, agent_id: str, run_input: dict) -> dict:
+    system_prompt, user_prompt = build_run_prompts(version, run_input)
+    selected_tools = (len(version.tool_allowlist) + len(version.mcp_tool_allowlist)
+                      + len(version.connector_allowlist) + len(version.skill_allowlist))
+    document_count = db.query(ContentItem).filter(ContentItem.agent_id == agent_id).count()
+    return build_preflight(version.harness_config["runtime_model"], system_prompt, user_prompt,
+                           run_input or {}, selected_tools, document_count)
+
+
+async def execute_run(db: Session, run: Run, version, agent_id: str, user_id: str) -> None:
+    """Runs the full agent loop for one `run` row, mutating it in place (status/output/timestamps)
+    and appending `run_step` rows as it goes. Raises nothing — failures are recorded on the run."""
+    run.status = "running"
+    run.started_at = datetime.now(timezone.utc).isoformat()
+    db.commit()
+    step_num = 0
+
+    runtime_model = version.harness_config["runtime_model"]
+    free = runtime_model.get("usage_tier", "standard") == "free"
+    budget = BudgetTracker(free=free)
+    session = None
+    last_text = ""
+    completed_tools = []
     try:
+        api_key = resolve_provider_key(db, user_id, runtime_model)
+        tools, dispatch = _build_tools_and_dispatch(db, user_id, version, agent_id, version.output_schema.json_schema)
+        system_prompt, user_message = build_run_prompts(version, run.input or {})
+        preflight = preflight_for_run(db, version, agent_id, run.input or {})
+        step_num = _log_step(db, run.id, step_num, "run_preflight", preflight)
+        if free and preflight["estimated_input_tokens"] > FREE_LIMITS["input_tokens"]:
+            raise BudgetExceeded("FREE_INPUT_TOKEN_BUDGET", "The rendered prompts exceed the free input-token budget.")
+        session = create_session(
+            provider=runtime_model["provider"], api_key=api_key, model=runtime_model["model_id"],
+            temperature=runtime_model.get("temperature", 0),
+            max_tokens=min(runtime_model.get("max_tokens", 4096), FREE_LIMITS["output_tokens_per_call"])
+            if free else runtime_model.get("max_tokens", 4096),
+            system_prompt=system_prompt, tools=tools,
+            timeout=min(runtime_model.get("timeout_ms", 300000) / 1000, 90 if free else 300),
+        )
         step_num = _log_step(db, run.id, step_num, "llm_call_started", {"message": user_message})
+        budget.before_model_call()
         turn = session.send(user_message)
         validation_retries = 0
         no_tool_call_retries = 0
 
-        for _ in range(MAX_ITERATIONS):
+        while True:
+            budget.before_iteration()
+            last_text = turn["text"] or last_text
             step_num = _log_step(db, run.id, step_num, "llm_call_completed", {"tool_calls": turn["tool_calls"], "text": turn["text"]})
 
             if not turn["tool_calls"]:
                 if no_tool_call_retries >= MAX_VALIDATION_RETRIES:
-                    raise RunFailedError("Model did not call any tool, including final_answer, after a retry.")
+                    raise RunFailedError("MODEL_DID_NOT_CALL_TOOL",
+                                         "The model did not call final_answer after a correction.", [
+                                             "Choose a model with reliable tool-calling support.",
+                                             "Simplify the system and user prompts."
+                                         ])
                 no_tool_call_retries += 1
+                budget.before_model_call()
                 turn = session.send(
                     f"You must call the '{FINAL_ANSWER_TOOL}' tool with your answer — do not reply with plain text."
                 )
@@ -193,8 +223,12 @@ async def execute_run(db: Session, run: Run, version, agent_id: str, user_id: st
                 except jsonschema.ValidationError as exc:
                     step_num = _log_step(db, run.id, step_num, "validation_error", {"error": str(exc)})
                     if validation_retries >= MAX_VALIDATION_RETRIES:
-                        raise RunFailedError(f"Final answer failed schema validation twice: {exc}") from exc
+                        raise RunFailedError("OUTPUT_SCHEMA_INVALID",
+                                             "The model could not produce an answer matching the output schema.", [
+                                                 "Simplify the output schema.", "Use a stronger structured-output model."
+                                             ]) from exc
                     validation_retries += 1
+                    budget.before_model_call()
                     turn = session.send_tool_results(
                         [{"id": final_call["id"], "name": FINAL_ANSWER_TOOL, "output": {"error": str(exc)}}]
                     )
@@ -212,25 +246,38 @@ async def execute_run(db: Session, run: Run, version, agent_id: str, user_id: st
                     results.append({"id": call["id"], "name": call["name"], "output": {"error": "Unknown tool"}})
                     continue
                 step_type, fn = dispatch[call["name"]]
+                budget.before_tool_call()
                 step_num = _log_step(db, run.id, step_num, f"{step_type}_started", {"name": call["name"], "arguments": call["arguments"]})
                 try:
                     output = await fn(call["arguments"])
                 except Exception as exc:  # a tool failing shouldn't crash the run — feed the error back
                     output = {"error": str(exc)}
                 step_num = _log_step(db, run.id, step_num, f"{step_type}_completed", {"name": call["name"], "output": output})
+                completed_tools.append({"name": call["name"], "status": "failed" if isinstance(output, dict) and output.get("error") else "completed"})
                 results.append({"id": call["id"], "name": call["name"], "output": output})
 
+            budget.before_model_call()
             turn = session.send_tool_results(results)
 
-        raise RunFailedError(f"Exceeded {MAX_ITERATIONS} iterations without a final answer.")
-
+    except SecretResolutionError as exc:
+        code, reason, retryable, recommendations, retry_after = (
+            "PROVIDER_CONNECTION_INVALID", str(exc), False,
+            ["Select or test a provider connection in the agent harness."], None
+        )
+    except BudgetExceeded as exc:
+        code, reason, retryable, recommendations, retry_after = exc.code, exc.reason, False, [
+            "Reduce the prompt or enabled tools.", "Split the request into smaller tasks.",
+            "Use a standard-tier key for extensive work."
+        ], None
     except RunFailedError as exc:
-        run.status = "failed"
-        run.output = {"error": str(exc)}
-        run.completed_at = datetime.now(timezone.utc).isoformat()
-        db.commit()
-    except Exception as exc:  # LLM provider errors (bad key, rate limit, etc.)
-        run.status = "failed"
-        run.output = {"error": f"Run failed: {exc}"}
-        run.completed_at = datetime.now(timezone.utc).isoformat()
-        db.commit()
+        code, reason, retryable, recommendations, retry_after = exc.code, exc.reason, False, exc.recommendations, None
+    except Exception as exc:
+        code, reason, retryable, recommendations, retry_after = classify_provider_failure(exc)
+
+    run.status = "failed"
+    limits = FREE_LIMITS if free else {"iterations": MAX_ITERATIONS}
+    run.output = failure_output(code, reason, budget.consumed(session), limits, recommendations,
+                                retryable, retry_after, last_text, completed_tools)
+    run.completed_at = datetime.now(timezone.utc).isoformat()
+    _log_step(db, run.id, step_num, "run_failure_classified", run.output["failure"])
+    db.commit()

@@ -1,3 +1,4 @@
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,10 +25,19 @@ class Settings(BaseSettings):
     internal_cron_secret: str
 
     jwt_audience: str = "authenticated"
+    supabase_jwt_issuer: str = ""
 
     # Explicit local-development escape hatch. Keep disabled in production.
     disable_auth: bool = False
     local_dev_user_id: str = ""
+    environment: str = "local"
+    metrics_token: str = ""
+
+    @model_validator(mode="after")
+    def prohibit_production_auth_bypass(self):
+        if self.environment.lower() in {"production", "prod"} and self.disable_auth:
+            raise ValueError("DISABLE_AUTH cannot be enabled in production")
+        return self
 
     @property
     def cors_origins_list(self) -> list[str]:

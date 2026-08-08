@@ -1,9 +1,6 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
-
-from app.db.models import PlatformTool
-from app.db.session import get_db
+from app.tools.registry import definitions
 
 router = APIRouter(prefix="/tools", tags=["tools"])
 
@@ -16,5 +13,5 @@ class PlatformToolOut(BaseModel):
 
 
 @router.get("/platform", response_model=list[PlatformToolOut])
-def list_platform_tools(db: Session = Depends(get_db)):
-    return db.query(PlatformTool).all()
+def list_platform_tools():
+    return definitions()

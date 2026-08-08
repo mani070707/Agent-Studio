@@ -39,12 +39,14 @@ class AgentUpdateIn(BaseModel):
 
 
 class RuntimeModelConfig(BaseModel):
-    provider: Literal["anthropic", "openai"]
+    provider: Literal["gemini", "groq", "openrouter", "anthropic", "openai"]
     model_id: str
     temperature: float = 0
     max_tokens: int = 4096
     timeout_ms: int = 300000
-    api_key_secret_ref: str
+    api_key_secret_ref: str | None = None
+    provider_connection_id: str | None = None
+    usage_tier: Literal["free", "standard"] = "standard"
 
 
 class PromptGuardrailsConfig(BaseModel):
@@ -179,6 +181,7 @@ def create_agent_version(
         mcp_tool_allowlist=body.mcp_tool_allowlist,
         connector_allowlist=body.connector_allowlist,
         skill_allowlist=body.skill_allowlist,
+        runtime_model=body.harness_config.runtime_model.model_dump(),
     )
 
     last_version = (
@@ -198,6 +201,7 @@ def create_agent_version(
         mcp_tool_allowlist=body.mcp_tool_allowlist,
         connector_allowlist=body.connector_allowlist,
         skill_allowlist=body.skill_allowlist,
+        runtime_model=body.harness_config.runtime_model.model_dump(),
     )
     db.add(version)
     db.commit()
@@ -244,6 +248,7 @@ def update_agent_version(
         mcp_tool_allowlist=body.mcp_tool_allowlist,
         connector_allowlist=body.connector_allowlist,
         skill_allowlist=body.skill_allowlist,
+        runtime_model=body.harness_config.runtime_model.model_dump(),
     )
 
     version.harness_config = body.harness_config.model_dump()

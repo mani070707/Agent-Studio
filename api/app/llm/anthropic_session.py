@@ -24,6 +24,8 @@ class AnthropicSession:
             for t in tools
         ]
         self.messages: list[dict] = []
+        self.provider = "anthropic"
+        self.usage = {"model_calls": 0, "input_tokens": 0, "output_tokens": 0}
 
     def _call(self) -> dict:
         response = self.client.messages.create(
@@ -34,6 +36,9 @@ class AnthropicSession:
             messages=self.messages,
             tools=self.tools,
         )
+        self.usage["model_calls"] += 1
+        self.usage["input_tokens"] += response.usage.input_tokens
+        self.usage["output_tokens"] += response.usage.output_tokens
         self.messages.append({"role": "assistant", "content": [b.model_dump() for b in response.content]})
         tool_calls = [
             {"id": block.id, "name": block.name, "arguments": block.input}
