@@ -1,0 +1,1 @@
+"""Durable content-ingestion module."""

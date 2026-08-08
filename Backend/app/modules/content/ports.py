@@ -1,0 +1,13 @@
+from typing import Protocol
+
+from app.modules.content.domain import ParsedDocument
+
+
+class ObjectStoragePort(Protocol):
+    def upload(self, path: str, content: bytes, content_type: str) -> None: ...
+    def download(self, path: str) -> bytes: ...
+    def delete(self, path: str) -> None: ...
+
+
+class DocumentParser(Protocol):
+    def parse(self, content: bytes) -> ParsedDocument: ...

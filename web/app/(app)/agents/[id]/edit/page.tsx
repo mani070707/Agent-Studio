@@ -16,6 +16,7 @@ import type {
   ModelProvider,
   ProviderConnection,
   RuntimeModelConfig,
+  KnowledgeBase,
   SchemaEntry,
   Skill,
 } from "@/lib/types";
@@ -43,6 +44,7 @@ export default function EditAgentPage() {
   const [loading, setLoading] = useState(true);
 
   const [provider, setProvider] = useState<RuntimeModelConfig["provider"]>("gemini");
+  const [runtimeEngine, setRuntimeEngine] = useState<"direct" | "langchain">("direct");
   const [modelId, setModelId] = useState("gemini-2.5-flash");
   const [apiKeySecretRef, setApiKeySecretRef] = useState("");
   const [providers, setProviders] = useState<ModelProvider[]>([]);
@@ -67,6 +69,9 @@ export default function EditAgentPage() {
   const [mcpToolAllowlist, setMcpToolAllowlist] = useState<string[]>([]);
   const [connectorAllowlist, setConnectorAllowlist] = useState<string[]>([]);
   const [skillAllowlist, setSkillAllowlist] = useState<string[]>([]);
+  const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
+  const [knowledgeBaseIds, setKnowledgeBaseIds] = useState<string[]>([]);
+  const [conversationMemory, setConversationMemory] = useState(false);
 
   const [newTrigger, setNewTrigger] = useState<{
     name: string;
@@ -77,7 +82,7 @@ export default function EditAgentPage() {
   useEffect(() => {
     async function load() {
       const [agentData, versions, skillsData, schemasData, toolsData, mcpServers, connectorsData, triggersData,
-        providersData, connectionsData] =
+        providersData, connectionsData, knowledgeBaseData] =
         await Promise.all([
           api.get<Agent>(`/agents/${agentId}`),
           api.get<AgentVersion[]>(`/agents/${agentId}/versions`),
@@ -89,6 +94,7 @@ export default function EditAgentPage() {
           api.get<AgentTrigger[]>(`/agents/${agentId}/triggers`),
           api.get<ModelProvider[]>("/model-providers"),
           api.get<ProviderConnection[]>("/provider-connections"),
+          api.get<KnowledgeBase[]>("/knowledge-bases?status=active"),
         ]);
 
       setAgent(agentData);
@@ -99,6 +105,7 @@ export default function EditAgentPage() {
       setTriggers(triggersData);
       setProviders(providersData);
       setConnections(connectionsData);
+      setKnowledgeBases(knowledgeBaseData);
 
       const flatMcpTools: (McpTool & { serverName: string })[] = [];
       for (const server of mcpServers) {
@@ -110,6 +117,7 @@ export default function EditAgentPage() {
       const existingDraft = versions.find((v) => !v.is_published) || null;
       setDraft(existingDraft);
       if (existingDraft) {
+        setRuntimeEngine(existingDraft.harness_config.runtime_engine || "direct");
         setProvider(existingDraft.harness_config.runtime_model.provider);
         setModelId(existingDraft.harness_config.runtime_model.model_id);
         setApiKeySecretRef(existingDraft.harness_config.runtime_model.api_key_secret_ref || "");
@@ -128,6 +136,8 @@ export default function EditAgentPage() {
         setMcpToolAllowlist(existingDraft.mcp_tool_allowlist);
         setConnectorAllowlist(existingDraft.connector_allowlist);
         setSkillAllowlist(existingDraft.skill_allowlist);
+        setKnowledgeBaseIds(existingDraft.knowledge_base_ids || []);
+        setConversationMemory(existingDraft.harness_config.memory?.vector_memory_enabled || false);
       }
       setLoading(false);
     }
@@ -170,8 +180,15 @@ export default function EditAgentPage() {
     setError("");
     const connectionId = await connectProvider();
     if (!connectionId && !apiKeySecretRef) return;
+    const effectiveTools = knowledgeBaseIds.length && !toolAllowlist.includes("search_documents")
+      ? [...toolAllowlist, "search_documents"] : toolAllowlist;
     const body = {
       harness_config: {
+        runtime_engine: runtimeEngine,
+        ...(agent?.agent_type === "workflow" ? { workflow: {
+          graph_version: "research_v1", max_plan_steps: 5, max_retrieval_queries: 3,
+          max_research_cycles: 2, max_repair_cycles: 1, approval_policy: "mcp_and_connectors",
+        }} : {}),
         runtime_model: {
           provider,
           model_id: modelId,
@@ -182,15 +199,21 @@ export default function EditAgentPage() {
           timeout_ms: 300000,
         },
         prompt_guardrails: { role, goal, guardrail_profile: guardrailProfile, context_mode: contextMode },
-        memory: { vector_memory_enabled: false, graph_memory_enabled: false, episodic_memory_enabled: false },
+        memory: { vector_memory_enabled: agent?.agent_type === "chat" && conversationMemory,
+                  graph_memory_enabled: false, episodic_memory_enabled: false },
       },
       skill_id: skillId,
       input_schema_id: inputSchemaId || null,
       output_schema_id: outputSchemaId,
-      tool_allowlist: toolAllowlist,
+      tool_allowlist: effectiveTools,
       mcp_tool_allowlist: mcpToolAllowlist,
       connector_allowlist: connectorAllowlist,
       skill_allowlist: skillAllowlist,
+      knowledge_base_ids: knowledgeBaseIds,
+      retrieval_config: {
+        mode: "hybrid", top_k: 6, max_per_document: 3,
+        standard_context_tokens: 2500, free_context_tokens: 1200,
+      },
     };
     try {
       const saved = draft
@@ -253,6 +276,20 @@ export default function EditAgentPage() {
       {step === 0 && (
         <div className="card">
           <h3>Runtime Model</h3>
+          {agent.agent_type === "workflow" && <div className="security-note"><span>◇</span><div>
+            <strong>Durable LangGraph research workflow</strong>
+            <p>Runs asynchronously through prepare, plan, retrieval, research, approval, draft, verification and finalization. MCP and connector calls always pause for approval.</p>
+          </div></div>}
+          <div className="field">
+            <label>Runtime implementation</label>
+            <div className="ds-segmented">
+              <button type="button" className={runtimeEngine === "direct" ? "active" : ""}
+                onClick={() => setRuntimeEngine("direct")}>Direct SDK</button>
+              <button type="button" className={runtimeEngine === "langchain" ? "active" : ""}
+                onClick={() => setRuntimeEngine("langchain")}>LangChain LCEL</button>
+            </div>
+            <small className="field-help">Changes orchestration code only. Provider pricing, budgets, tools and output contracts remain the same for this version.</small>
+          </div>
           <div className="field">
             <label>Provider</label>
             <select value={provider} onChange={(e) => {
@@ -398,6 +435,34 @@ export default function EditAgentPage() {
               </label>
             ))}
           </div>
+
+          <h3>Knowledge Bases</h3>
+          <p className="field-help">Bind up to five reusable bases to this version. Runs retrieve automatically and may search again with the document tool.</p>
+          <div className="checkbox-list">
+            {knowledgeBases.map((base) => (
+              <label key={base.id}>
+                <input type="checkbox" checked={knowledgeBaseIds.includes(base.id)}
+                  disabled={!knowledgeBaseIds.includes(base.id) && knowledgeBaseIds.length >= 5}
+                  onChange={() => {
+                    const next = toggleInList(knowledgeBaseIds, base.id);
+                    setKnowledgeBaseIds(next);
+                    if (next.length && !toolAllowlist.includes("search_documents")) {
+                      setToolAllowlist([...toolAllowlist, "search_documents"]);
+                    }
+                  }} /> {base.name} — {base.document_count} document{base.document_count === 1 ? "" : "s"}
+                {base.document_count === 0 && <small className="field-help"> No indexed evidence is available yet.</small>}
+              </label>
+            ))}
+            {!knowledgeBases.length && <p className="field-help">Create and index a knowledge base in Content Store first.</p>}
+          </div>
+          <small className="field-help">Hybrid retrieval returns up to 6 chunks with a {usageTier === "free" ? "1,200" : "2,500"}-token context budget.</small>
+
+          {agent.agent_type === "chat" && <><h3>Conversation Memory</h3>
+            <label className="checkbox-row"><input type="checkbox" checked={conversationMemory}
+              onChange={(event) => setConversationMemory(event.target.checked)} />
+              Remember previous messages in explicitly created conversation threads</label>
+            <p className="field-help">Opt-in · pinned to this version · retained for 30 days. Older turns may be summarized with this model and consume provider quota.</p>
+          </>}
 
           <h3>Allowed Skills</h3>
           <div className="checkbox-list">

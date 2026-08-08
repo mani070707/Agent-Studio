@@ -70,6 +70,34 @@ export interface ContentItem {
   knowledge_base_id: string;
   filename: string;
   storage_path: string;
+  status: "queued" | "processing" | "ready" | "failed";
+  mime_type: string | null;
+  size_bytes: number | null;
+  page_count: number | null;
+  character_count: number | null;
+  extraction_version: number;
+  error_code: string | null;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+  index_status: "pending" | "indexing" | "indexed" | "failed";
+  embedding_model: string | null;
+  index_version: number | null;
+  chunk_count: number;
+  indexed_at: string | null;
+  index_error_code: string | null;
+  index_error_message: string | null;
+}
+
+export interface SemanticSearchResult {
+  chunk_id: string;
+  content_id: string;
+  filename: string;
+  ordinal: number;
+  page_start: number | null;
+  page_end: number | null;
+  score: number;
+  excerpt: string;
 }
 
 export interface KnowledgeBase {
@@ -156,9 +184,12 @@ export interface MemoryConfig {
 }
 
 export interface HarnessConfig {
+  runtime_engine: "direct" | "langchain";
   runtime_model: RuntimeModelConfig;
   prompt_guardrails: PromptGuardrailsConfig;
   memory: MemoryConfig;
+  workflow?: { graph_version: "research_v1"; max_plan_steps: number; max_retrieval_queries: number;
+    max_research_cycles: number; max_repair_cycles: number; approval_policy: "mcp_and_connectors" };
 }
 
 export interface AgentVersion {
@@ -175,6 +206,14 @@ export interface AgentVersion {
   skill_allowlist: string[];
   is_published: boolean;
   published_at: string | null;
+  knowledge_base_ids: string[];
+  retrieval_config: {
+    mode: "hybrid";
+    top_k: number;
+    max_per_document: number;
+    standard_context_tokens: number;
+    free_context_tokens: number;
+  };
 }
 
 export interface AgentTrigger {
@@ -190,7 +229,7 @@ export interface AgentTrigger {
 export interface Run {
   id: string;
   agent_version_id: string;
-  status: "pending" | "running" | "completed" | "failed";
+  status: "pending" | "queued" | "running" | "waiting_approval" | "completed" | "failed" | "cancelled";
   input: Record<string, unknown>;
   output: (Record<string, unknown> & {
     error?: string;
@@ -199,6 +238,84 @@ export interface Run {
   }) | null;
   started_at: string | null;
   completed_at: string | null;
+  citations: RunCitation[];
+  grounding_status: "grounded" | "insufficient_evidence" | null;
+  retrieval_stats: Record<string, unknown>;
+  runtime_engine: "direct" | "langchain" | "langgraph";
+  runtime_stats: {
+    model_calls?: number;
+    tool_calls?: number;
+    input_tokens?: number;
+    output_tokens?: number;
+    provider_latency_ms?: number;
+    orchestration_overhead_ms?: number;
+    total_duration_ms?: number;
+  };
+}
+
+export interface RunCitation {
+  source_id: string;
+  knowledge_base_id: string;
+  document_id: string;
+  chunk_id: string;
+  filename: string;
+  page_start: number | null;
+  page_end: number | null;
+  score: number;
+  excerpt: string;
+}
+
+export interface ConversationThread {
+  id: string;
+  agent_id: string;
+  agent_version_id: string;
+  title: string;
+  status: "active" | "archived";
+  memory_enabled: boolean;
+  summary_present: boolean;
+  summary_token_count: number;
+  message_token_count: number;
+  message_count: number;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConversationMessage {
+  id: string;
+  thread_id: string;
+  role: "user" | "assistant";
+  content: { text?: string; output?: Record<string, unknown>; citations?: RunCitation[]; status?: string };
+  run_id: string | null;
+  token_count: number;
+  created_at: string;
+}
+
+export interface ConversationTurnResponse {
+  run: Run;
+  messages: ConversationMessage[];
+  memory: { context_tokens: number; summarized: boolean; expires_at: string };
+}
+
+export interface WorkflowGraph {
+  graph_version: string;
+  current_node: string;
+  status: string;
+  resumable: boolean;
+  nodes: Array<{ id: string; events: Array<{ status: string; attempt: number; detail: Record<string, unknown> }> }>;
+  edges: Array<{ source: string; target: string }>;
+}
+
+export interface WorkflowApproval {
+  id: string;
+  tool_name: string;
+  tool_type: "connector" | "mcp";
+  arguments: Record<string, unknown>;
+  arguments_hash: string;
+  status: "pending" | "approved" | "rejected";
+  reason: string;
+  created_at: string;
+  expires_at: string;
 }
 
 export interface RunFailure {
@@ -221,7 +338,14 @@ export interface EvaluationDataset {
   id: string;
   agent_id: string;
   name: string;
+  description: string;
   threshold: number;
+  retrieval_recall_threshold: number;
+  citation_precision_threshold: number;
+  grounding_threshold: number;
+  status: "active" | "archived";
+  created_at: string;
+  updated_at: string;
 }
 
 export interface EvaluationCase {
@@ -230,6 +354,9 @@ export interface EvaluationCase {
   input: Record<string, unknown>;
   expected_output: Record<string, unknown>;
   compare_fields: string[];
+  expected_document_ids: string[];
+  expected_chunk_ids: string[];
+  retrieval_k: number;
 }
 
 export interface EvaluationRun {
@@ -237,5 +364,28 @@ export interface EvaluationRun {
   agent_version_id: string;
   dataset_id: string;
   score: number;
-  status: "pending" | "passed" | "failed";
+  status: "queued" | "running" | "retry_wait" | "passed" | "failed";
+  completed_cases: number;
+  total_cases: number;
+  metrics: Record<string, number>;
+  gate_results: Record<string, boolean>;
+  error_code: string | null;
+  error_message: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface EvaluationCaseResult {
+  id: string;
+  evaluation_case_id: string;
+  run_id: string | null;
+  status: "passed" | "failed";
+  retrieved_sources: RunCitation[];
+  expected_evidence: { document_ids: string[]; chunk_ids: string[] };
+  metrics: Record<string, number>;
+  field_mismatches: Array<{ field: string; expected: unknown; actual: unknown }>;
+  latency_ms: number;
+  token_usage: Record<string, number>;
+  error_code: string | null;
+  error_message: string | null;
 }

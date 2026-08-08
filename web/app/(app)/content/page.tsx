@@ -2,8 +2,9 @@
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "@/lib/api";
-import type { ContentItem, KnowledgeBase } from "@/lib/types";
+import type { ContentItem, KnowledgeBase, SemanticSearchResult } from "@/lib/types";
 import { ConfirmDialog, Drawer, EmptyState, LoadingGrid, MetricStrip, PageHero, StatusBadge } from "@/components/ui";
+import { streamEvents } from "@/lib/events";
 
 type Filter = "active" | "archived";
 
@@ -21,6 +22,9 @@ export default function ContentStorePage() {
   const [deletingDocument, setDeletingDocument] = useState<ContentItem | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<SemanticSearchResult[]>([]);
+  const [searching, setSearching] = useState(false);
 
   const loadBases = useCallback(async () => {
     setLoading(true);
@@ -36,16 +40,33 @@ export default function ContentStorePage() {
 
   useEffect(() => { void loadBases(); }, [loadBases]);
 
+  const loadDocuments = useCallback(async (base: KnowledgeBase) => {
+    const items = await api.get<ContentItem[]>(`/knowledge-bases/${base.id}/content`);
+    setDocuments(items);
+    return items;
+  }, []);
+
   async function openBase(base: KnowledgeBase) {
     setSelected(base);
     setDocuments([]);
     setError("");
+    setSearchQuery("");
+    setSearchResults([]);
     try {
-      setDocuments(await api.get<ContentItem[]>(`/knowledge-bases/${base.id}/content`));
+      await loadDocuments(base);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : String(err));
     }
   }
+
+  useEffect(() => {
+    if (!selected) return;
+    return streamEvents({ onEvent: (event) => {
+      if (event.resource_type === "ingestion" || event.resource_type === "indexing") void loadDocuments(selected);
+    }, onConnection: (connected) => {
+      if (!connected) window.setTimeout(() => void loadDocuments(selected), 5000);
+    }});
+  }, [loadDocuments, selected]);
 
   function openEditor(base: KnowledgeBase | "new") {
     setEditing(base);
@@ -110,12 +131,62 @@ export default function ContentStorePage() {
     }
   }
 
+  async function retryDocument(document: ContentItem) {
+    if (!selected) return;
+    setError("");
+    try {
+      await api.post(`/content/${document.id}/retry`, {});
+      await loadDocuments(selected);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    }
+  }
+
+  async function retryIndex(document: ContentItem) {
+    if (!selected) return;
+    setError("");
+    try {
+      await api.post(`/content/${document.id}/reindex`, {});
+      await loadDocuments(selected);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    }
+  }
+
+  async function testSearch(event: FormEvent) {
+    event.preventDefault();
+    if (!selected || !searchQuery.trim()) return;
+    setSearching(true);
+    setError("");
+    try {
+      setSearchResults(await api.post<SemanticSearchResult[]>(`/knowledge-bases/${selected.id}/search`, { query: searchQuery.trim(), limit: 5 }));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  function documentTone(status: ContentItem["status"]): "success" | "danger" | "warning" | "info" {
+    if (status === "ready") return "success";
+    if (status === "failed") return "danger";
+    if (status === "processing") return "info";
+    return "warning";
+  }
+
+  function indexTone(status: ContentItem["index_status"]): "success" | "danger" | "warning" | "info" {
+    if (status === "indexed") return "success";
+    if (status === "failed") return "danger";
+    if (status === "indexing") return "info";
+    return "warning";
+  }
+
   const documentTotal = bases.reduce((sum, base) => sum + base.document_count, 0);
 
   return <div className="page">
     <PageHero eyebrow="Reusable knowledge" title="Content Store" description="Organize trusted documents into knowledge bases that can later be shared across agent versions." actions={<button className="btn" onClick={() => openEditor("new")}>+ New knowledge base</button>} />
     <MetricStrip items={[{ value: bases.length, label: `${filter === "active" ? "Active" : "Archived"} bases` }, { value: documentTotal, label: "Documents" }, { value: "Tenant private", label: "Access" }]} />
-    <div className="security-note"><span>i</span><div><strong>Foundation milestone</strong><p>Files are organized and tenant-isolated now. Embeddings, vector search, citations, and agent bindings arrive in later milestones.</p></div></div>
+    <div className="security-note"><span>i</span><div><strong>Semantic index foundation</strong><p>Documents move through extraction, chunking, embedding, and indexing. Test search returns evidence candidates—not generated answers or verified facts.</p></div></div>
     <div className="ds-toolbar"><div className="ds-segmented">{(["active", "archived"] as Filter[]).map(value => <button key={value} className={filter === value ? "active" : ""} onClick={() => { setSelected(null); setFilter(value); }}>{value[0].toUpperCase() + value.slice(1)}</button>)}</div></div>
     {error && !editing && !uploadOpen && <p className="form-error alert-box">{error}</p>}
     {loading ? <LoadingGrid /> : bases.length ? <div className="ds-card-grid">{bases.map(base => <article className="ds-resource-card" key={base.id}>
@@ -131,11 +202,13 @@ export default function ContentStorePage() {
 
     <Drawer open={!!selected && !uploadOpen} title={selected?.name || "Knowledge base"} subtitle={`${selected?.document_count || 0} documents`} onClose={() => setSelected(null)} footer={selected?.status === "active" ? <button className="btn" onClick={() => { setFile(null); setUploadOpen(true); }}>+ Upload document</button> : undefined}>
       {selected?.status === "archived" && <p className="field-help">Archived knowledge bases are read-only. Their documents have not been deleted.</p>}
-      {documents.length ? <div className="ds-table-wrap"><table className="ds-table"><thead><tr><th>Document</th><th>Compatibility</th><th></th></tr></thead><tbody>{documents.map(document => <tr key={document.id}><td data-label="Document"><span className="ds-table-primary">{document.filename}</span></td><td data-label="Compatibility">{document.agent_id ? "Legacy agent linked" : "Knowledge base only"}</td><td data-label="Actions"><div className="ds-table-actions">{selected?.status === "active" && <button className="btn btn-danger" onClick={() => setDeletingDocument(document)}>Delete</button>}</div></td></tr>)}</tbody></table></div> : <EmptyState icon="↥" title="No documents yet" description="Upload a PDF or text document. Agent retrieval will be connected in a later milestone." />}
+      {documents.some(document => document.index_status === "indexed") && <form onSubmit={testSearch} className="field"><label>Test semantic search</label><div className="ds-toolbar"><input maxLength={4000} value={searchQuery} onChange={event => setSearchQuery(event.target.value)} placeholder="What information should be retrieved?" /><button className="btn btn-secondary" disabled={searching || !searchQuery.trim()}>{searching ? "Searching…" : "Search"}</button></div><small>Results are ranked chunks for debugging retrieval quality. They are not answers or citations.</small></form>}
+      {searchResults.length > 0 && <div className="ds-card-grid">{searchResults.map(result => <article className="ds-resource-card" key={result.chunk_id}><div className="ds-card-top"><span className="ds-card-meta">{result.filename}{result.page_start ? ` · page ${result.page_start}${result.page_end !== result.page_start ? `–${result.page_end}` : ""}` : ""}</span><StatusBadge tone="info">{(result.score * 100).toFixed(1)}%</StatusBadge></div><p>{result.excerpt}</p><small>Chunk {result.ordinal + 1}</small></article>)}</div>}
+      {documents.length ? <div className="ds-table-wrap"><table className="ds-table"><thead><tr><th>Document</th><th>Extraction</th><th>Index</th><th>Details</th><th></th></tr></thead><tbody>{documents.map(document => <tr key={document.id}><td data-label="Document"><span className="ds-table-primary">{document.filename}</span>{document.error_message && <small className="form-error">{document.error_message}</small>}{document.index_error_message && <small className="form-error">{document.index_error_message}</small>}</td><td data-label="Extraction"><StatusBadge tone={documentTone(document.status)}>{document.status}</StatusBadge></td><td data-label="Index"><StatusBadge tone={indexTone(document.index_status)}>{document.index_status}</StatusBadge></td><td data-label="Details">{document.index_status === "indexed" ? `${document.chunk_count} chunks` : document.status === "ready" ? `${document.character_count?.toLocaleString() || 0} characters${document.page_count ? ` · ${document.page_count} pages` : ""}` : document.agent_id ? "Legacy agent linked" : "Knowledge base only"}</td><td data-label="Actions"><div className="ds-table-actions">{selected?.status === "active" && document.status === "failed" && <button className="btn btn-secondary" onClick={() => void retryDocument(document)}>Retry extraction</button>}{selected?.status === "active" && document.status === "ready" && document.index_status === "failed" && <button className="btn btn-secondary" onClick={() => void retryIndex(document)}>Retry index</button>}{selected?.status === "active" && <button className="btn btn-danger" onClick={() => setDeletingDocument(document)}>Delete</button>}</div></td></tr>)}</tbody></table></div> : <EmptyState icon="↥" title="No documents yet" description="Upload a PDF, TXT, or Markdown file. Agent retrieval will be connected in a later milestone." />}
     </Drawer>
 
     <Drawer open={uploadOpen} title="Upload document" subtitle={selected?.name || "Knowledge base"} onClose={() => setUploadOpen(false)} footer={<><button className="btn btn-secondary" onClick={() => setUploadOpen(false)}>Cancel</button><button className="btn" form="upload-content" type="submit" disabled={!file || uploading}>{uploading ? "Uploading…" : "Upload"}</button></>}>
-      <form id="upload-content" onSubmit={uploadDocument}>{error && <p className="form-error">{error}</p>}<label className="upload-dropzone"><span>↥</span><strong>{file ? file.name : "Choose a PDF or text file"}</strong><small>This compatibility path extracts text immediately; it does not create embeddings yet.</small><input type="file" accept=".pdf,.txt,text/plain,application/pdf" onChange={event => setFile(event.target.files?.[0] || null)} /></label></form>
+      <form id="upload-content" onSubmit={uploadDocument}>{error && <p className="form-error">{error}</p>}<label className="upload-dropzone"><span>↥</span><strong>{file ? file.name : "Choose a PDF, TXT, or Markdown file"}</strong><small>The upload returns immediately and extraction continues safely in the background.</small><input type="file" accept=".pdf,.txt,.md,.markdown,text/plain,text/markdown,application/pdf" onChange={event => setFile(event.target.files?.[0] || null)} /></label></form>
     </Drawer>
 
     <ConfirmDialog open={!!archiving} title="Archive this knowledge base?" description="It becomes read-only, but its documents and storage objects are preserved." confirmLabel="Archive" onClose={() => setArchiving(null)} onConfirm={archiveBase} />
