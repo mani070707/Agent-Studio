@@ -1,7 +1,7 @@
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.db.models import Connector, McpTool, ProviderConnection, SchemaEntry, Skill
+from app.db.models import Connector, KnowledgeBase, McpTool, ProviderConnection, SchemaEntry, Skill
 from app.modules.providers.domain import ProviderCatalog
 from app.tools.registry import PLATFORM_TOOLS
 
@@ -18,6 +18,7 @@ def validate_harness_selections(
     connector_allowlist: list[str],
     skill_allowlist: list[str],
     runtime_model: dict,
+    knowledge_base_ids: list[str] | None = None,
 ) -> None:
     """Reject a harness config referencing anything not in the registry or not owned by
     this user — enforced server-side, not just hidden in the UI."""
@@ -74,3 +75,17 @@ def validate_harness_selections(
         ).first()
         if not connection or connection.provider != provider:
             raise HTTPException(status_code=400, detail="Provider connection is unavailable or does not match")
+
+    knowledge_base_ids = knowledge_base_ids or []
+    if len(knowledge_base_ids) > 5:
+        raise HTTPException(status_code=400, detail="At most five knowledge bases may be bound to one version")
+    if len(set(knowledge_base_ids)) != len(knowledge_base_ids):
+        raise HTTPException(status_code=400, detail="Duplicate knowledge-base bindings are not allowed")
+    owned = db.query(KnowledgeBase.id).filter(
+        KnowledgeBase.id.in_(knowledge_base_ids), KnowledgeBase.user_id == user_id,
+        KnowledgeBase.status == "active",
+    ).count() if knowledge_base_ids else 0
+    if owned != len(knowledge_base_ids):
+        raise HTTPException(status_code=400, detail="A selected knowledge base is unavailable or archived")
+    if knowledge_base_ids and "search_documents" not in tool_allowlist:
+        raise HTTPException(status_code=400, detail="Hybrid knowledge retrieval requires search_documents")

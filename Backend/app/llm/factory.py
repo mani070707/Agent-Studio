@@ -1,6 +1,8 @@
 from app.llm.anthropic_session import AnthropicSession
 from app.llm.openai_session import OpenAISession
 from app.llm.gemini_session import GeminiSession
+from app.runtime.direct import DirectRuntimeSession
+from app.runtime.langchain import LangChainRuntimeSession
 
 _SESSION_CLASSES = {"anthropic": AnthropicSession, "openai": OpenAISession, "gemini": GeminiSession}
 
@@ -18,3 +20,11 @@ def create_session(provider: str, **kwargs):
     if provider not in _SESSION_CLASSES:
         raise ValueError(f"Unsupported LLM provider: {provider}. Supported: {list(_SESSION_CLASSES)}")
     return _SESSION_CLASSES[provider](**kwargs)
+
+
+def create_runtime_session(engine: str, provider: str, **kwargs):
+    if engine == "langchain":
+        return LangChainRuntimeSession(provider=provider, **kwargs)
+    if engine != "direct":
+        raise ValueError(f"Unsupported runtime engine: {engine}")
+    return DirectRuntimeSession(create_session(provider=provider, **kwargs))

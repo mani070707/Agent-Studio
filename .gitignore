@@ -50,8 +50,14 @@ api/.venv/
 api/venv/
 api/__pycache__/
 api/**/__pycache__/
+api/.model-cache/
+Backend/.model-cache/
 *.pyc
 *.egg-info/
+
+### Private local documentation ###
+/docs/
+/LEARNING-ROADMAP.md
 
 ### Secrets & local env (never push) ###
 .env

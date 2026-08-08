@@ -22,3 +22,7 @@ def upload_file(storage_path: str, content: bytes, content_type: str = "applicat
 def delete_file(storage_path: str) -> None:
     client = _get_client()
     client.storage.from_(settings.supabase_storage_bucket).remove([storage_path])
+
+
+def download_file(storage_path: str) -> bytes:
+    return _get_client().storage.from_(settings.supabase_storage_bucket).download(storage_path)

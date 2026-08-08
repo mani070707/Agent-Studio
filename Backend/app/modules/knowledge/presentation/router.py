@@ -35,6 +35,23 @@ class ContentResponse(BaseModel):
     knowledge_base_id: str
     filename: str
     storage_path: str
+    status: str
+    mime_type: str | None
+    size_bytes: int | None
+    page_count: int | None
+    character_count: int | None
+    extraction_version: int
+    error_code: str | None
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+    index_status: str
+    embedding_model: str | None
+    index_version: int | None
+    chunk_count: int
+    indexed_at: datetime | None
+    index_error_code: str | None
+    index_error_message: str | None
 
 
 def service(db: Session = Depends(get_db)) -> KnowledgeBaseService:
